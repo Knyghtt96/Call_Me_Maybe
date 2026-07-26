@@ -1,0 +1,16 @@
+annotated-types==0.8.0
+ast_serialize==0.6.0
+flake8==7.3.0
+librt==0.13.0
+mccabe==0.7.0
+mypy==2.3.0
+mypy_extensions==1.1.0
+pathspec==1.1.1
+pycodestyle==2.14.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+pydocstyle==6.3.0
+pyflakes==3.4.0
+snowballstemmer==3.1.1
+typing-inspection==0.4.2
+typing_extensions==4.16.0
