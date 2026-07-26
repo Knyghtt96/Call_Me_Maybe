@@ -44,6 +44,7 @@ lint: install
 	$(VENV)/bin/flake8 . $(FLAKE8_EXCLUDE)
 	$(VENV)/bin/mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs $(MYPY_EXCLUDE)
 
+#Usefull trick to push on github / vogsphere in one command
 git:
 	git remote remove vog || true
 	git remote remove git || true
@@ -55,6 +56,7 @@ git:
 	git push git main
 	git push vog main
 
+#rework pydoc here
 pydoc:
 	pydocstyle simulation parser main.py
 
