@@ -5,11 +5,13 @@ from argparse import Namespace
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="call-me-maybe",
-        description="Translate prompts into structured function calls."
+        description="Translate prompts into structured function calls.",
+        # usage="uv run python -m src"
+        add_help=True  # enable/disable the -h command, default = True
     )
     parser.add_argument(
                         "--functions_definition",
-                        default="data/input/function_definition.json",
+                        default="data/input/functions_definition.json",
                         help="Path to the functions definition JSON file."
                     )
     parser.add_argument(
