@@ -2,14 +2,6 @@
 
 SRC = src
 
-# Exclude venv from checks, otherwise many errors will raise.
-FLAKE8_EXCLUDE = --exclude=$(VENV),__pycache__,.mypy_cache
-MYPY_EXCLUDE = --exclude '^(($(VENV))|__pycache__|\.mypy_cache)(/|$$)'
-
-# install virtual environement
-venv:
-	python3 -m venv $(VENV)
-
 # install dependencies in virtual environement.
 install:
 	uv sync
@@ -44,14 +36,14 @@ lint-strict: install
 	uv run mypy . --strict
 
 #Usefull trick to push on github / vogsphere in one command
+# usage : make git MSG="feat: add parser"
 git:
 	git remote remove vog || true
 	git remote remove git || true
 	git remote add vog git@vogsphere-v2.42belgium.be:vogsphere/intra-uuid-0df5a4d2-0dbd-460c-91fc-c3b3d2309984-7551192-mde-bruy
 	git remote add git git@github.com:Knyghtt96/Call_Me_Maybe.git
 	git add .
-	git commit -m "$(MSG)" || true
-	# usage : make git MSG="feat: add parser"	
+	git commit -m "$(MSG)" || true	
 	git push git main
 	git push vog main
 

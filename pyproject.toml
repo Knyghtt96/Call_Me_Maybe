@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.5.1",
     "pydantic>=2.13.4",
+    "llm-sdk",
 ]
 
 [dependency-groups]
@@ -12,3 +13,9 @@ dev = [
     "flake8>=7.3.0",
     "mypy>=2.3.0",
 ]
+
+[tool.uv.sources]
+llm-sdk = { path = "llm_sdk" }
+
+[tool.mypy]
+exclude = ['^llm_sdk/', '^\.venv/']
