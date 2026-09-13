@@ -1,10 +1,6 @@
 # VARIABLES
 
-VENV = callmemaybe_env
-PYTHON = $(VENV)/bin/python3
-PIP = $(VENV)/bin/pip
-#REQUIREMENTS = requirements.txt
-SCRIPT = main.py
+SRC = src
 
 # Exclude venv from checks, otherwise many errors will raise.
 FLAKE8_EXCLUDE = --exclude=$(VENV),__pycache__,.mypy_cache
@@ -15,12 +11,12 @@ venv:
 	python3 -m venv $(VENV)
 
 # install dependencies in virtual environement.
-install: venv
-	$(PIP) install -r $(REQUIREMENTS) 
+install:
+	uv sync
 
 # run the script under venv.
 run: install
-	$(PYTHON) $(SCRIPT)
+	uv run python -m $(SRC)
 
 # Run PDB for python
 # post mortem debug ( if program crash ) : python3 -m pdb program.py
@@ -28,21 +24,24 @@ run: install
 # to know value of a var: p var 
 # to quit debugger: q
 debug: install
-	$(PYTHON) -m pdb $(SCRIPT)
-# 	$(PYTHON) -m pdb $(SCRIPT) $(CONFIG)
+	uv run python -m pdb -m $(SRC)
 
 # Remove every artifact.
 clean:
-	rm -rf __pycache__
-	rm -rf parser/__pycache__
-	rm -rf simulation/__pycache__
-	rm -rf .mypy_cache
-	rm -rf $(VENV)
+	rm -rf __pycache__ $(SRC)/__pycache__ .mypy_cache .pytest_cache data/output
+
+fclean: clean
+	rm -rf .venv
 
 #check flake8 & mypy / VENV folder excluded.
 lint: install
-	$(VENV)/bin/flake8 . $(FLAKE8_EXCLUDE)
-	$(VENV)/bin/mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs $(MYPY_EXCLUDE)
+	uv run flake8 .
+	uv run mypy . --warn-return-any --warn-unused-ignores \
+		--ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
+
+lint-strict: install
+	uv run flake8 .
+	uv run mypy . --strict
 
 #Usefull trick to push on github / vogsphere in one command
 git:
@@ -53,11 +52,8 @@ git:
 	git add .
 	git commit -m "$(MSG)" || true
 	# usage : make git MSG="feat: add parser"	
-	git push git main --force
-	git push vog main --force
+	git push git main
+	git push vog main
 
-#rework pydoc here
-pydoc:
-	pydocstyle simulation parser main.py
 
-.PHONY: venv install run debug clean lint lint-strict git
+.PHONY: install run debug clean fclean lint lint-strict git
