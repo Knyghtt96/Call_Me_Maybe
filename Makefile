@@ -1,6 +1,7 @@
 # VARIABLES
 
 SRC = src
+NAME = CALL_ME_MAYBE
 
 # install dependencies in virtual environement.
 install:
@@ -25,6 +26,10 @@ clean:
 fclean: clean
 	rm -rf .venv
 
+# Offline structural test: no model weights needed.
+test: install
+	uv run python tests/test_offline.py
+
 #check flake8 & mypy / VENV folder excluded.
 lint: install
 	uv run flake8 .
@@ -47,5 +52,29 @@ git:
 	git push git main
 	git push vog main
 
+tar: clean
+	tar --exclude='.venv' \
+	    --exclude='.git' \
+	    --exclude='__pycache__' \
+	    --exclude='.mypy_cache' \
+	    --exclude='.pytest_cache' \
+	    --exclude='*.pyc' \
+	    --exclude='en.subject.pdf' \
+	    -czvf /tmp/$(NAME).tar.gz .
+	mv /tmp/$(NAME).tar.gz .
 
-.PHONY: install run debug clean fclean lint lint-strict git
+zip: clean
+	zip -r /tmp/$(NAME).zip . \
+		-x ".venv/*" \
+		-x ".git/*" \
+		-x "*__pycache__/*" \
+		-x ".mypy_cache/*" \
+		-x ".pytest_cache/*" \
+		-x "*.pyc" \
+		-x "en.subject.pdf" \
+		-x "$(NAME).tar.gz" \
+		-x "$(NAME).zip"
+	mv /tmp/$(NAME).zip .
+
+
+.PHONY: install run debug clean fclean lint lint-strict git zip tar

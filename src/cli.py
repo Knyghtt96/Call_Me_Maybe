@@ -1,8 +1,15 @@
+"""Command line interface."""
+
 import argparse
 from argparse import Namespace
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser.
+
+    Returns:
+        The configured parser.
+    """
     parser = argparse.ArgumentParser(
         prog="call-me-maybe",
         description="Translate prompts into structured function calls.",
@@ -28,5 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args() -> Namespace:
+    """Parse the command line arguments.
+
+    Returns:
+        The parsed arguments.
+    """
     parser = build_parser()
     return parser.parse_args()

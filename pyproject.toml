@@ -19,3 +19,8 @@ llm-sdk = { path = "llm_sdk" }
 
 [tool.mypy]
 exclude = ['^llm_sdk/', '^\.venv/']
+
+[[tool.mypy.overrides]]
+module = ["llm_sdk", "llm_sdk.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
