@@ -1,27 +1,28 @@
 """Prompt construction.
 
-The prompt carries semantics only: which functions exist, and what the user
-asked. The JSON structure is never requested from the model, it is imposed by
-the decoder. Two choices matter here:
+The prompt carries meaning only: which functions exist and what the user
+asked. The JSON structure is never requested from the model, it is imposed
+by the decoder. Two choices matter here:
 
 * the chat format of the model is reproduced explicitly, because an
-  instruction-tuned model follows a request far better inside the turn layout
-  it was trained on;
+  instruction-tuned model follows a request far better inside the turn
+  layout it was trained on;
 * a single example is shown, built on functions that do not exist in the
   input file. It teaches the answer *shape*, never the answers themselves.
 """
 
 from .models import FunctionDefinition
 
-_SYSTEM = (
+SYSTEM = (
     "<|im_start|>system\n"
-    "You are a function calling engine. You select exactly one function and "
-    "extract each argument from the request. Arguments are literal and as "
-    "short as possible: a replacement is plain text, never a pattern. "
-    "Never repeat yourself.<|im_end|>\n"
+    "You are a function calling engine. You select exactly one function "
+    "and extract each argument from the request. Copy every argument "
+    "exactly as written in the request, without the quotes around it. "
+    "Arguments are literal and as short as possible: a replacement is "
+    "plain text, never a pattern. Never repeat yourself.<|im_end|>\n"
 )
 
-_EXAMPLE = (
+EXAMPLE = (
     "<|im_start|>user\n"
     "Available functions:\n"
     "- fn_count_chars(text: string) -> number: Count the characters of a "
@@ -34,7 +35,7 @@ _EXAMPLE = (
     '"pattern": "[0-9]", "value": "#"}}<|im_end|>\n'
 )
 
-_REQUEST = (
+REQUEST = (
     "<|im_start|>user\n"
     "Available functions:\n"
     "{functions}"
@@ -56,8 +57,9 @@ def describe_function(function: FunctionDefinition) -> str:
         f"{name}: {param.type}"
         for name, param in function.parameters.items()
     )
+    returns = function.returns.type if function.returns else "none"
     return (
-        f"- {function.name}({params}) -> {function.returns.type}: "
+        f"- {function.name}({params}) -> {returns}: "
         f"{function.description}\n"
     )
 
@@ -76,7 +78,7 @@ def build_prompt(
         The prompt text, ending right before the generated answer.
     """
     body = "".join(describe_function(function) for function in functions)
-    return _SYSTEM + _EXAMPLE + _REQUEST.format(
+    return SYSTEM + EXAMPLE + REQUEST.format(
         functions=body,
         prompt=user_prompt,
     )

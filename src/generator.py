@@ -1,96 +1,64 @@
-"""Constrained generation of function calls.
+"""Constrained generation of one function call.
 
-The JSON skeleton is written by this module, never by the model. The model is
-only asked to fill two kinds of holes: which function to call, and what each
-argument is worth. Both are produced token by token under a mask, so the
-result is valid JSON by construction.
+The generator writes the JSON skeleton itself, token by token, and asks
+the model to fill only the slots: the function name, then each argument
+value. At every step the logits are masked so that only tokens keeping the
+call valid can be selected.
 """
 
-import json
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from llm_sdk import Small_LLM_Model
+from pydantic import BaseModel, ConfigDict
 
 from .errors import GenerationError
 from .mask import masked_argmax
 from .models import FunctionCallResult, FunctionDefinition
 from .prompt import build_prompt
-from .state import ChoiceSlot, Slot, slot_for_type
+from .state import BooleanSlot, ChoiceSlot, NumberSlot, Slot, StringSlot
 from .vocab import Vocabulary
 
 
-@runtime_checkable
-class LanguageModel(Protocol):
-    """Minimal interface required from the LLM SDK."""
-
-    def encode(self, text: str) -> Any:
-        """Encode text into token identifiers."""
-
-    def get_logits_from_input_ids(self, input_ids: list[int]) -> list[float]:
-        """Return the next-token logits for a token sequence."""
-
-    def get_path_to_vocab_file(self) -> str:
-        """Return the path to the vocabulary file."""
-
-
-def _flatten(raw: Any) -> list[int]:
-    """Turn an encoder output into a flat list of token identifiers.
+def slot_for_type(type_name: str) -> Slot:
+    """Create the slot matching a declared parameter type.
 
     Args:
-        raw: Value returned by the SDK encoder.
+        type_name: One of the supported type names.
 
     Returns:
-        The token identifiers as a flat list.
+        A fresh slot.
 
     Raises:
-        GenerationError: If the value cannot be interpreted.
+        GenerationError: If the type is not supported.
     """
-    data = raw.tolist() if hasattr(raw, "tolist") else raw
-    if isinstance(data, list) and data and isinstance(data[0], list):
-        data = data[0]
-    if not isinstance(data, list) or not all(
-        isinstance(item, int) for item in data
-    ):
-        raise GenerationError("Unexpected token encoding from the SDK.")
-    return [int(item) for item in data]
+    if type_name == "string":
+        return StringSlot()
+    if type_name == "number":
+        return NumberSlot()
+    if type_name == "integer":
+        return NumberSlot(integer=True)
+    if type_name == "boolean":
+        return BooleanSlot()
+    raise GenerationError(f"Unsupported parameter type: {type_name!r}")
 
 
 class Generator(BaseModel):
-    """Translate natural language prompts into structured function calls.
+    """Turn a natural language request into a validated function call.
 
     Attributes:
-        llm: Language model wrapper provided by the SDK.
-        vocab: Token tables used to build the masks.
-        functions: Every callable function.
+        llm: Loaded model.
+        vocab: Token tables built from the model.
+        functions: Callable functions, in file order.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    llm: LanguageModel
+    llm: Small_LLM_Model
     vocab: Vocabulary
     functions: list[FunctionDefinition]
 
-    _end_of_turn: int | None = PrivateAttr(default=None)
-
-    def model_post_init(self, context: Any) -> None:
-        """Resolve the end-of-turn token of the chat format.
-
-        An instruction-tuned model signals the end of its answer with a
-        dedicated token. Accepting it as a stop signal lets the model decide
-        that a value is complete, instead of forcing it to spell out the
-        closing quote.
-
-        Args:
-            context: Validation context, unused.
-        """
-        try:
-            ids = self._encode("<|im_end|>")
-        except GenerationError:
-            return
-        self._end_of_turn = ids[0] if len(ids) == 1 else None
-
     def generate(self, user_prompt: str) -> FunctionCallResult:
-        """Produce the function call matching a natural language prompt.
+        """Generate the function call answering ``user_prompt``.
 
         Args:
             user_prompt: Natural language request.
@@ -99,163 +67,87 @@ class Generator(BaseModel):
             The validated function call.
 
         Raises:
-            GenerationError: If no function is defined.
+            GenerationError: If the model returns unusable logits.
         """
-        if not self.functions:
-            raise GenerationError("No function definition available.")
+        ids = self._encode(build_prompt(self.functions, user_prompt))
 
-        text = build_prompt(self.functions, user_prompt)
-        ids = self._encode(text)
-
-        answer = '{"name": "'
-        ids += self._encode(answer)
-
+        ids += self._encode('{"name": "')
         names = [function.name for function in self.functions]
-        name_slot = ChoiceSlot(candidates=names)
-        name = self._fill(ids, name_slot, '"')
-        answer += name
-
+        name = str(self._fill(ids, ChoiceSlot(candidates=names)))
         function = self._function_named(name)
-        segment = '", "parameters": {'
-        answer += segment
-        ids += self._encode(segment)
+        ids += self._encode('", "parameters": {')
 
-        answer += self._fill_parameters(ids, function)
-        return self._validate(user_prompt, answer)
-
-    def _fill_parameters(
-        self,
-        ids: list[int],
-        function: FunctionDefinition,
-    ) -> str:
-        """Generate every argument of a function.
-
-        Args:
-            ids: Token sequence built so far, extended in place.
-            function: Definition of the selected function.
-
-        Returns:
-            The JSON text of the arguments, closing braces included.
-        """
+        parameters: dict[str, Any] = {}
         items = list(function.parameters.items())
-        if not items:
-            closing = "}}"
-            ids += self._encode(closing)
-            return closing
-
-        answer = ""
-        last = len(items) - 1
         for position, (key, param) in enumerate(items):
-            opening = f'"{key}": '
-            if param.type == "string":
-                opening += '"'
-            answer += opening
-            ids += self._encode(opening)
+            quote = '"' if param.type == "string" else ""
+            ids += self._encode(f'"{key}": {quote}')
+            parameters[key] = self._fill(ids, slot_for_type(param.type))
+            closing = "}}" if position == len(items) - 1 else ", "
+            ids += self._encode(quote + closing)
+        if not items:
+            ids += self._encode("}}")
 
-            terminator = '"' if param.type == "string" else (
-                "}" if position == last else ","
-            )
-            answer += self._fill(ids, slot_for_type(param.type), terminator)
+        return FunctionCallResult(
+            prompt=user_prompt,
+            name=name,
+            parameters=parameters,
+        )
 
-            closing = '"' if param.type == "string" else ""
-            closing += "}}" if position == last else ", "
-            answer += closing
-            ids += self._encode(closing)
-        return answer
-
-    def _fill(self, ids: list[int], slot: Slot, terminator: str) -> str:
-        """Generate one slot under a mask.
+    def _fill(self, ids: list[int], slot: Slot) -> Any:
+        """Let the model fill one slot under constraint.
 
         Args:
-            ids: Token sequence built so far, extended in place.
-            slot: State describing what is legal at each step.
-            terminator: Text whose first token ends the slot.
+            ids: Token identifiers of the text generated so far. Accepted
+                tokens are appended in place.
+            slot: Slot to fill.
 
         Returns:
-            The text produced for this slot.
+            The typed value produced by the slot.
+
+        Raises:
+            GenerationError: If the model returns unusable logits.
         """
-        stops = set(self.vocab.ids_starting_with(terminator))
-        if self._end_of_turn is not None:
-            stops.add(self._end_of_turn)
         while not slot.exhausted():
-            extra = stops if slot.can_terminate() else None
-            try:
-                token = masked_argmax(
-                    self.llm.get_logits_from_input_ids(ids),
-                    slot.allowed_ids(self.vocab),
-                    extra,
-                    slot.banned_ids(),
-                )
-            except GenerationError:
+            allowed = slot.allowed_ids(self.vocab) - slot.banned_ids()
+            stops: set[int] = set()
+            if slot.can_terminate():
+                stops = slot.stop_ids(self.vocab)
+            if not allowed and not stops:
                 break
-            if token in stops and slot.can_terminate():
-                return slot.produced
-            slot.accept(token, self.vocab.text_of(token))
-            ids.append(token)
-        return slot.fallback()
+            logits = self.llm.get_logits_from_input_ids(ids)
+            token_id = masked_argmax(logits, allowed | stops)
+            if token_id in stops:
+                break
+            slot.accept(token_id, self.vocab.text_of(token_id))
+            ids.append(token_id)
+        return slot.value()
 
     def _function_named(self, name: str) -> FunctionDefinition:
-        """Look up a function by name.
+        """Return the declared function called ``name``.
 
         Args:
-            name: Name produced by the decoder.
+            name: Function name produced by the model.
 
         Returns:
             The matching definition.
 
         Raises:
-            GenerationError: If the name is unknown.
+            GenerationError: If no function has that name.
         """
         for function in self.functions:
             if function.name == name:
                 return function
-        raise GenerationError(f"Generated unknown function name: {name}")
-
-    def _validate(self, user_prompt: str, answer: str) -> FunctionCallResult:
-        """Parse and validate the generated JSON.
-
-        Args:
-            user_prompt: Original request.
-            answer: Generated JSON object.
-
-        Returns:
-            The validated result.
-
-        Raises:
-            GenerationError: If the JSON is unusable.
-        """
-        try:
-            payload = json.loads(answer)
-        except json.JSONDecodeError as exc:
-            raise GenerationError(f"Generated invalid JSON: {answer}") from exc
-
-        name = payload.get("name", "")
-        function = self._function_named(str(name))
-        parameters = payload.get("parameters", {})
-        if not isinstance(parameters, dict):
-            raise GenerationError("Generated parameters are not an object.")
-
-        typed: dict[str, Any] = {}
-        for key, param in function.parameters.items():
-            value = parameters.get(key)
-            typed[key] = (
-                float(value)
-                if param.type == "number" and isinstance(value, (int, float))
-                else value
-            )
-        return FunctionCallResult(
-            prompt=user_prompt,
-            name=function.name,
-            parameters=typed,
-        )
+        raise GenerationError(f"Unknown function name: {name!r}")
 
     def _encode(self, text: str) -> list[int]:
-        """Encode a literal segment of the answer.
+        """Tokenise a piece of text with the SDK.
 
         Args:
-            text: Text to encode.
+            text: Text to tokenise.
 
         Returns:
-            The token identifiers of that text.
+            The token identifiers as plain integers.
         """
-        return _flatten(self.llm.encode(text))
+        tensor = self.llm.encode(text)
+        return [int(token_id) for token_id in tensor.tolist()[0]]

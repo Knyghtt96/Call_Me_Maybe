@@ -1,44 +1,65 @@
-"""Command line interface."""
+"""Command line arguments."""
 
 import argparse
-from argparse import Namespace
+from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict
+
+DEFAULT_FUNCTIONS = Path("data/input/functions_definition.json")
+DEFAULT_INPUT = Path("data/input/function_calling_tests.json")
+DEFAULT_OUTPUT = Path("data/output/function_calling_results.json")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser.
+class Arguments(BaseModel):
+    """Validated command line arguments.
 
-    Returns:
-        The configured parser.
+    Attributes:
+        functions_definition: Path of the function definition file.
+        input: Path of the prompt file.
+        output: Path of the result file.
     """
-    parser = argparse.ArgumentParser(
-        prog="call-me-maybe",
-        description="Translate prompts into structured function calls.",
-        # usage="uv run python -m src"
-        add_help=True  # enable/disable the -h command, default = True
-    )
-    parser.add_argument(
-                        "--functions_definition",
-                        default="data/input/functions_definition.json",
-                        help="Path to the functions definition JSON file."
-                    )
-    parser.add_argument(
-                        "--input",
-                        default="data/input/function_calling_tests.json",
-                        help="Path to the input prompts file."
-                    )
-    parser.add_argument(
-                        "--output",
-                        default="data/output/function_calling_results.json",
-                        help="Path to the output prompts file."
-                    )
-    return parser
+
+    model_config = ConfigDict(extra="forbid")
+
+    functions_definition: Path = DEFAULT_FUNCTIONS
+    input: Path = DEFAULT_INPUT
+    output: Path = DEFAULT_OUTPUT
 
 
-def parse_args() -> Namespace:
-    """Parse the command line arguments.
+def parse_args(argv: list[str] | None = None) -> Arguments:
+    """Parse the command line.
+
+    Args:
+        argv: Arguments to parse, or ``None`` to use ``sys.argv``.
 
     Returns:
         The parsed arguments.
     """
-    parser = build_parser()
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(
+        prog="python -m src",
+        description="Translate natural language prompts into function calls.",
+    )
+    parser.add_argument(
+        "--functions_definition",
+        type=Path,
+        default=DEFAULT_FUNCTIONS,
+        help="JSON file listing the callable functions",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT,
+        help="JSON file listing the prompts to process",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="JSON file to write the function calls to",
+    )
+    namespace = parser.parse_args(argv)
+    return Arguments(
+        functions_definition=namespace.functions_definition,
+        input=namespace.input,
+        output=namespace.output,
+    )

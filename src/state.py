@@ -1,115 +1,119 @@
-"""Generation states used by the constrained decoder.
+"""Generation slots: one per kind of value the model has to fill.
 
-Each state (a "slot") answers a single question: given what has already been
-produced, which tokens may legally come next? The decoder never parses the
-output afterwards -- validity is guaranteed while generating.
+The program writes the JSON structure itself and only leaves *slots* to
+the model: the function name and each argument value. A slot knows which
+tokens keep it valid at the current step, when it may be closed, and how
+to turn the produced text into a typed Python value.
 """
 
+import json
 from abc import ABC, abstractmethod
+from typing import Any
 
-import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .vocab import Vocabulary
 
-#: Either an explicit set of token ids or a pre-computed numpy array.
-AllowedIds = set[int] | np.ndarray
-
-_DIGITS = "0123456789"
-
-#: Size of the n-gram that may not be repeated inside a string value.
-_NO_REPEAT_NGRAM = 3
+DIGITS = "0123456789"
 
 
 class Slot(BaseModel, ABC):
-    """Base class for a constrained generation state.
+    """Common behaviour of every slot.
 
     Attributes:
-        produced: Text generated so far for this slot.
-        tokens: Identifiers of the tokens accepted by this slot.
-        max_tokens: Hard limit protecting against runaway generation.
+        produced: Text generated so far.
+        tokens: Identifiers accepted so far.
+        max_tokens: Budget after which the slot is closed by force.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     produced: str = ""
-    tokens: list[int] = []
+    tokens: list[int] = Field(default_factory=list)
     max_tokens: int = 32
 
     @abstractmethod
-    def allowed_ids(self, vocab: Vocabulary) -> AllowedIds:
-        """Return the tokens that may extend this slot.
+    def allowed_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens that may extend the value at this step.
 
         Args:
-            vocab: Vocabulary of the model.
+            vocab: Token tables.
 
         Returns:
-            The identifiers of every legal continuation token.
+            Identifiers of the legal tokens.
         """
 
     @abstractmethod
-    def can_terminate(self) -> bool:
-        """Tell whether the slot currently holds a complete value.
+    def stop_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens that close the value.
+
+        Args:
+            vocab: Token tables.
 
         Returns:
-            ``True`` when generation may stop here.
+            Identifiers of the closing tokens.
         """
 
     @abstractmethod
-    def fallback(self) -> str:
-        """Return a safe value used when generation reaches a dead end.
-
-        Returns:
-            A value that always satisfies the schema.
-        """
+    def value(self) -> Any:
+        """Return the typed Python value built from the produced text."""
 
     def banned_ids(self) -> set[int]:
-        """Return tokens forbidden on top of the allowed set.
+        """Return tokens forbidden at this step even though they are legal.
 
         Returns:
-            Identifiers that must be masked out at this step.
+            Identifiers to remove from the allowed set. Empty by default.
         """
         return set()
 
-    def accept(self, token_id: int, text: str) -> None:
-        """Record a chosen token.
-
-        Args:
-            token_id: Identifier of the accepted token.
-            text: Real text of the accepted token.
-        """
-        self.produced += text
-        self.tokens.append(token_id)
-
-    def exhausted(self) -> bool:
-        """Tell whether the token budget of this slot is spent.
+    def can_terminate(self) -> bool:
+        """Tell whether the value produced so far is complete.
 
         Returns:
-            ``True`` when no further token may be generated.
+            ``True`` when a closing token may be accepted.
+        """
+        return True
+
+    def exhausted(self) -> bool:
+        """Tell whether the token budget is spent.
+
+        Returns:
+            ``True`` when no more token may be generated.
         """
         return len(self.tokens) >= self.max_tokens
 
+    def accept(self, token_id: int, text: str) -> None:
+        """Record a generated token.
+
+        Args:
+            token_id: Identifier of the token.
+            text: Text of the token.
+        """
+        self.tokens.append(token_id)
+        self.produced += text
+
 
 class ChoiceSlot(Slot):
-    """Slot restricted to one value out of a closed list.
+    """A value that must be exactly one of several candidates.
 
-    Used for function names and for booleans: the model decides, but it can
-    only ever spell out one of the candidates.
+    Used for the function name: the model may only produce tokens that
+    continue at least one declared name.
 
     Attributes:
-        candidates: Every acceptable complete value.
+        candidates: Acceptable values.
     """
 
     candidates: list[str]
 
-    def allowed_ids(self, vocab: Vocabulary) -> AllowedIds:
-        """Return tokens that extend at least one remaining candidate.
+    def allowed_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens that keep the text a prefix of a candidate.
 
         Args:
-            vocab: Vocabulary of the model.
+            vocab: Token tables.
 
         Returns:
-            Identifiers of every legal continuation token.
+            Identifiers of every token whose text, appended to the text
+            produced so far, is still the beginning of a candidate.
         """
         allowed: set[int] = set()
         for candidate in self.candidates:
@@ -122,182 +126,232 @@ class ChoiceSlot(Slot):
                     allowed.add(token_id)
         return allowed
 
-    def can_terminate(self) -> bool:
-        """Tell whether the produced text is already a full candidate.
+    def stop_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens closing a quoted value.
+
+        Args:
+            vocab: Token tables.
 
         Returns:
-            ``True`` when the value is complete.
+            Identifiers of the tokens starting with a quote.
+        """
+        return vocab.quote_ids
+
+    def can_terminate(self) -> bool:
+        """Tell whether the produced text is a complete candidate.
+
+        Returns:
+            ``True`` when the text matches one of the candidates.
         """
         return self.produced in self.candidates
 
-    def fallback(self) -> str:
-        """Return the shortest candidate still compatible.
+    def chosen(self) -> str:
+        """Return the chosen candidate.
+
+        When the budget ran out before a candidate was complete, the first
+        candidate that starts with the produced text is used.
 
         Returns:
-            A complete candidate value.
+            One of the candidates.
         """
-        matching = [
-            candidate
-            for candidate in self.candidates
-            if candidate.startswith(self.produced)
-        ]
-        pool = matching or self.candidates
-        return min(pool, key=len)
+        if self.produced in self.candidates:
+            return self.produced
+        for candidate in self.candidates:
+            if candidate.startswith(self.produced):
+                return candidate
+        return self.candidates[0]
+
+    def value(self) -> Any:
+        """Return the chosen candidate as the value of the slot.
+
+        Returns:
+            One of the candidates.
+        """
+        return self.chosen()
+
+
+class BooleanSlot(ChoiceSlot):
+    """A ``true`` or ``false`` literal, written without quotes.
+
+    Attributes:
+        candidates: Always the two JSON boolean literals.
+    """
+
+    candidates: list[str] = ["true", "false"]
+
+    def stop_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens closing an unquoted value.
+
+        Args:
+            vocab: Token tables.
+
+        Returns:
+            Identifiers of the tokens starting with a comma or a brace.
+        """
+        return vocab.comma_ids | vocab.brace_ids
+
+    def value(self) -> Any:
+        """Return the boolean matching the produced literal.
+
+        Returns:
+            ``True`` for ``true``, ``False`` otherwise.
+        """
+        return self.chosen() == "true"
 
 
 class NumberSlot(Slot):
-    """Slot producing a JSON number.
+    """A JSON number: optional minus sign, digits, optional decimal point.
 
-    Qwen tokenises digits one by one, so the legal set is tiny: the ten
-    digits, an optional leading minus sign and at most one decimal point.
-    Leading zeros are rejected to stay strictly JSON compliant.
+    Qwen tokenises digits one by one, so the legal set is tiny. Leading
+    zeros are refused because ``01`` is not valid JSON.
+
+    Attributes:
+        integer: When ``True`` the decimal point is forbidden.
     """
 
-    max_tokens: int = 16
+    integer: bool = False
+    max_tokens: int = 24
 
-    def allowed_ids(self, vocab: Vocabulary) -> AllowedIds:
-        """Return the digits and punctuation legal at this position.
+    def allowed_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens that keep the text a valid number prefix.
 
         Args:
-            vocab: Vocabulary of the model.
+            vocab: Token tables.
 
         Returns:
-            Identifiers of every legal continuation token.
+            Identifiers of the legal digit and sign tokens.
         """
-        allowed: set[int] = set()
-        digits = self._digits_allowed()
-        for digit in _DIGITS if digits else "":
-            token_id = vocab.text_to_id.get(digit)
-            if token_id is not None:
-                allowed.add(token_id)
+        legal = ""
         if self.produced == "":
-            minus = vocab.text_to_id.get("-")
-            if minus is not None:
-                allowed.add(minus)
-        if self._point_allowed():
-            point = vocab.text_to_id.get(".")
-            if point is not None:
-                allowed.add(point)
-        return allowed
+            legal += "-"
+        if self.produced not in ("0", "-0"):
+            legal += DIGITS
+        if (
+            not self.integer
+            and self._has_digit()
+            and "." not in self.produced
+        ):
+            legal += "."
+        return {
+            vocab.text_to_id[char]
+            for char in legal
+            if char in vocab.text_to_id
+        }
+
+    def stop_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens closing an unquoted value.
+
+        Args:
+            vocab: Token tables.
+
+        Returns:
+            Identifiers of the tokens starting with a comma or a brace.
+        """
+        return vocab.comma_ids | vocab.brace_ids
+
+    def can_terminate(self) -> bool:
+        """Tell whether the produced text is a complete number.
+
+        Returns:
+            ``True`` once a digit exists and the text does not end on a
+            decimal point.
+        """
+        return self._has_digit() and not self.produced.endswith(".")
+
+    def value(self) -> int | float:
+        """Return the produced number with the right Python type.
+
+        Returns:
+            An ``int`` when no decimal point was produced, a ``float``
+            otherwise, or ``0`` if no digit was produced at all.
+        """
+        text = self.produced.rstrip(".")
+        if not any(char in DIGITS for char in text):
+            return 0
+        if "." in text:
+            return float(text)
+        return int(text)
 
     def _has_digit(self) -> bool:
         """Tell whether at least one digit was produced.
 
         Returns:
-            ``True`` when the value already holds a digit.
+            ``True`` when the text contains a digit.
         """
-        return any(char in _DIGITS for char in self.produced)
-
-    def _digits_allowed(self) -> bool:
-        """Tell whether another digit may be appended.
-
-        Returns:
-            ``False`` when it would create a leading zero.
-        """
-        return self.produced not in ("0", "-0")
-
-    def _point_allowed(self) -> bool:
-        """Tell whether a decimal point may be appended.
-
-        Returns:
-            ``True`` when the point keeps the number valid.
-        """
-        return self._has_digit() and "." not in self.produced
-
-    def can_terminate(self) -> bool:
-        """Tell whether the number is complete.
-
-        Returns:
-            ``True`` when at least one digit was produced and the value does
-            not end with a decimal point.
-        """
-        return self._has_digit() and not self.produced.endswith(".")
-
-    def fallback(self) -> str:
-        """Return a valid number when generation fails.
-
-        Returns:
-            The produced value if usable, ``"0"`` otherwise.
-        """
-        return self.produced if self.can_terminate() else "0"
+        return any(char in DIGITS for char in self.produced)
 
 
 class StringSlot(Slot):
-    """Slot producing the body of a JSON string.
+    """The content of a JSON string, without its quotes.
 
-    Every token containing a quote, a backslash or a control character is
-    masked out, so the produced text never needs escaping and the closing
-    quote can only appear where the decoder allows it.
+    Every accepted token keeps the string valid JSON: no control character,
+    no unescaped quote and no backslash except in an escaped quote, so the
+    text can always be parsed back into a Python string.
+
+    Attributes:
+        ngram: Length of the repeated sequences that are blocked.
     """
 
-    max_tokens: int = 32
+    ngram: int = 3
 
-    def banned_ids(self) -> set[int]:
-        """Forbid tokens that would repeat an already produced n-gram.
+    def allowed_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens legal inside a string.
 
-        Small models fall into loops such as ``$1 $2 $3 $1 $2 $3``. Blocking
-        any repeated n-gram inside the same value stops that drift without
-        constraining the content itself.
-
-        Returns:
-            Identifiers that would close a repeated n-gram.
-        """
-        window = _NO_REPEAT_NGRAM - 1
-        if len(self.tokens) < window:
-            return set()
-        prefix = tuple(self.tokens[-window:])
-        banned: set[int] = set()
-        for start in range(len(self.tokens) - window):
-            if tuple(self.tokens[start:start + window]) == prefix:
-                banned.add(self.tokens[start + window])
-        return banned
-
-    def allowed_ids(self, vocab: Vocabulary) -> AllowedIds:
-        """Return the tokens that are safe inside a JSON string.
+        The first token may not start with a space, so that a value comes
+        out as ``shrek`` rather than `` shrek``.
 
         Args:
-            vocab: Vocabulary of the model.
+            vocab: Token tables.
 
         Returns:
-            Identifiers of every legal continuation token.
+            Identifiers of the legal tokens.
         """
         if self.produced == "":
-            return vocab.string_ids_no_space
+            return vocab.string_start_ids
         return vocab.string_ids
 
-    def can_terminate(self) -> bool:
-        """Tell whether the string may be closed.
+    def stop_ids(self, vocab: Vocabulary) -> set[int]:
+        """Return the tokens closing a quoted value.
+
+        Args:
+            vocab: Token tables.
 
         Returns:
-            ``True`` once at least one token was produced.
+            Identifiers of the tokens starting with a quote.
         """
-        return self.produced != ""
+        return vocab.quote_ids
 
-    def fallback(self) -> str:
-        """Return the text produced so far.
+    def banned_ids(self) -> set[int]:
+        """Forbid the token that would repeat an n-gram already produced.
+
+        Small models fall into loops such as ``$1 $2 $1 $2``. Any sequence
+        of ``ngram`` tokens already present in the value cannot be produced
+        again.
 
         Returns:
-            The current value, possibly empty.
+            Identifiers that would complete a repeated n-gram.
         """
-        return self.produced
+        if len(self.tokens) < self.ngram:
+            return set()
+        prefix = tuple(self.tokens[-(self.ngram - 1):])
+        banned: set[int] = set()
+        for start in range(len(self.tokens) - self.ngram + 1):
+            window = self.tokens[start:start + self.ngram]
+            if tuple(window[:-1]) == prefix:
+                banned.add(window[-1])
+        return banned
 
+    def value(self) -> str:
+        """Return the produced text as a Python string.
 
-def slot_for_type(type_name: str) -> Slot:
-    """Build the slot matching a parameter type.
+        The text is JSON source, so an escaped quote is turned back into a
+        plain quote by the JSON parser.
 
-    Args:
-        type_name: Type declared in ``functions_definition.json``.
-
-    Returns:
-        A slot enforcing that type.
-
-    Raises:
-        ValueError: If the type is not supported.
-    """
-    if type_name == "number":
-        return NumberSlot()
-    if type_name == "string":
-        return StringSlot()
-    if type_name == "boolean":
-        return ChoiceSlot(candidates=["true", "false"])
-    raise ValueError(f"Unsupported parameter type: {type_name}")
+        Returns:
+            The decoded string.
+        """
+        try:
+            decoded = json.loads(f'"{self.produced}"')
+        except json.JSONDecodeError:
+            return self.produced
+        return str(decoded)

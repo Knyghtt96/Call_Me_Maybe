@@ -1,17 +1,18 @@
-"""Custom exceptions raised by the Call Me Maybe pipeline."""
+"""Exceptions raised by the program.
+
+Every error that the program knows how to explain derives from
+:class:`CallMeMaybeError`, so the entry point can catch one type, print a
+clear message and exit without a traceback.
+"""
 
 
 class CallMeMaybeError(Exception):
-    """Base class for every error raised by this project."""
+    """Base class for every error reported to the user."""
 
 
 class InputError(CallMeMaybeError):
-    """Raised when an input file is missing, unreadable or invalid."""
-
-
-class VocabError(CallMeMaybeError):
-    """Raised when the model vocabulary cannot be loaded or decoded."""
+    """A file cannot be read, parsed or does not match the expected shape."""
 
 
 class GenerationError(CallMeMaybeError):
-    """Raised when constrained generation reaches a dead end."""
+    """The model or the decoder could not produce a function call."""
