@@ -3,16 +3,12 @@
 SRC = src
 NAME = CALL_ME_MAYBE
 
-# Caches 42 : le quota de /home est petit, le modèle pèse 1,5 Go.
-# Si un dossier /sgoinfre existe pour l'utilisateur courant (machines 42),
-# les caches de uv et de Hugging Face y sont placés. Ailleurs (maison,
-# WSL), rien n'est modifié et les caches restent dans ~/.cache.
-USER ?= $(shell id -un)
+USER = mde-bruy
 SGOINFRE = /sgoinfre/students/$(USER)
-ifneq ($(wildcard $(SGOINFRE)/.),)
-export UV_CACHE_DIR ?= $(SGOINFRE)/.cache/uv
-export HF_HOME ?= $(SGOINFRE)/.cache/huggingface
-endif
+
+export UV_PROJECT_ENVIRONMENT := $(SGOINFRE)/.venv
+export UV_CACHE_DIR := $(SGOINFRE)/.cache/uv
+export HF_HOME := $(SGOINFRE)/.cache/huggingface
 
 # Installe les dépendances dans l'environnement virtuel.
 install:
